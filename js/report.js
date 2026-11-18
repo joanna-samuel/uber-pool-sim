@@ -530,17 +530,18 @@
     if (!p.poolCompleted) {
       body1 = 'No pool trip finished in this run, so there is nothing to measure yet. Raise the opt-in share or the number of riders.';
     } else {
-      body1 = 'All ' + fmt.int(p.poolCompleted) + ' completed pool riders got ' + cfg.poolDiscount + '% off, but '
-        + '<b>' + fmt.int(p.unmatched) + ' (' + fmt.pct(1 - p.matchRate) + ') never shared a second</b>: '
-        + fmt.money(p.leaked) + ' of discount bought no pooling at all. Drivers’ premium, by contrast, is only paid on shared seconds ('
-        + fmt.money(pw.premium) + '). Platform margin: <b>' + fmt.money(pw.margin) + '</b> with Pool vs '
+      body1 = '<b>' + fmt.int(p.unmatched) + '</b> completed pool riders never shared and paid the solo fare'
+        + (p.kept > 0 ? ', keeping <b>' + fmt.money(p.kept) + '</b> that a flat ' + cfg.poolDiscount + '% opt-in discount would have given away' : '')
+        + '. <b>' + fmt.int(p.matched) + '</b> shared and saved ' + fmt.money(p.saved)
+        + (p.detourOff > 0.005 ? ', of which ' + fmt.money(p.detourOff) + ' is the extra off for a longer detour' : '')
+        + '. Platform margin: <b>' + fmt.money(pw.margin) + '</b> with Pool vs '
         + fmt.money(bw.margin) + ' without (' + fmt.signedMoney(pw.margin - bw.margin) + ').'
-        + '<span class="so">The cost of Pool scales with the opt-in rate; the benefit scales with the match rate. Match rate is a density problem (riders per cab per block), not a pricing one.</span>';
+        + '<span class="so">The discount is paid only for a trip that shared, and it shrinks as the detour grows. How often that happens is still a density problem.</span>';
     }
     var try1 = p.matchRate != null && p.matchRate < 0.75 && cfg.riders < 1000
       ? tryButton({ riders: Math.min(1000, cfg.riders * 2) }, 'Try denser demand: K = ' + Math.min(1000, cfg.riders * 2))
       : tryButton({ poolDiscount: Math.max(5, Math.round(cfg.poolDiscount / 2)) }, 'Try a smaller discount: Y = ' + Math.max(5, Math.round(cfg.poolDiscount / 2)) + '%');
-    cards.push({ n: 1, title: 'Y is paid on every opt-in. X is paid only on a match.', body: body1, action: try1 });
+    cards.push({ n: 1, title: 'The discount is for sharing, and a longer detour pays less.', body: body1, action: try1 });
 
     // 2. Driver outcome depends on scarcity.
     var sameRider = d.steps.lostToSharing + d.steps.detourPay + d.steps.premium;
@@ -568,32 +569,36 @@
       : tryButton({ cabs: Math.max(1, Math.round(cfg.cabs / 2)) }, 'Try halving the fleet: N = ' + Math.max(1, Math.round(cfg.cabs / 2)));
     cards.push({ n: 2, title: 'Whether drivers win is set by what’s scarce, not by X.', body: body2, action: try2 });
 
-    // 3. The guarantee covers the ride, not the trip, and not equally.
-    var tw = s.twin.pool;
+    // 3. Door-to-door cap against the solo cab that was actually available.
     var body3;
     if (!p.poolCompleted) {
       body3 = 'No pool trip finished yet, so the promise has not been tested.';
     } else {
-      body3 = 'No pool rider exceeded ' + cfg.maxDetour.toFixed(2) + '× their estimate (worst: ' + fmt.ratio(p.maxRatio) + '), even though '
-        + fmt.pct(p.reroutedShare) + ' of them had their cab reroute mid-ride to fit someone in. But the promise is only about time in the car. ';
-      if (tw.n) {
-        body3 += '<b>' + fmt.pct(tw.later) + ' of pool riders reached their destination later</b> than the same riders in the no-pool city'
-          + (tw.beyondCap > 0 ? ', and ' + fmt.pct(tw.beyondCap, 1) + ' took more than ' + cfg.maxDetour.toFixed(2) + '× as long door to door' : '') + '. ';
+      body3 = 'No pool rider exceeded ' + cfg.maxDetour.toFixed(2) + '× their in-car estimate (worst: '
+        + fmt.ratio(p.maxRatio) + '). ';
+      if (!p.doorOffered) {
+        body3 += 'No completed pool trip had a solo cab in range at assignment, so the door-to-door cap did not apply. ';
+      } else if (!p.doorBroken) {
+        body3 += '<b>None</b> of the ' + fmt.int(p.doorOffered) + ' who had a solo cab in range finished later than '
+          + cfg.maxDetour.toFixed(2) + '× that solo door-to-door. ';
+      } else {
+        body3 += '<b>' + fmt.int(p.doorBroken) + '</b> of ' + fmt.int(p.doorOffered)
+          + ' who had a solo cab in range finished outside ' + cfg.maxDetour.toFixed(2) + '× that door-to-door. ';
       }
       if (p.hostRatio != null && p.joinerRatio != null) {
         var hx = p.hostRatio - 1, jx = p.joinerRatio - 1;
-        body3 += 'And the detour is lopsided: riders already aboard averaged <b>' + fmt.ratio(p.hostRatio) + '</b> their estimate, riders who joined them <b>'
+        body3 += 'Riders already aboard averaged <b>' + fmt.ratio(p.hostRatio) + '</b> their estimate, riders who joined them <b>'
           + fmt.ratio(p.joinerRatio) + '</b>. '
-          + (jx > 0.005 && hx > jx * 1.1 ? 'The first rider absorbs ' + (hx / jx).toFixed(1) + '× as much extra time, for the same ' + cfg.poolDiscount + '% discount.'
-            : jx > 0.005 && jx > hx * 1.1 ? 'The joining rider absorbs ' + (jx / Math.max(hx, 0.001)).toFixed(1) + '× as much extra time, for the same ' + cfg.poolDiscount + '% discount.'
-            : 'Both pay the same ' + cfg.poolDiscount + '% less regardless.');
+          + (jx > 0.005 && hx > jx * 1.1 ? 'The first rider absorbs ' + (hx / jx).toFixed(1) + '× as much extra time, and their fare is scaled down by that detour.'
+            : jx > 0.005 && jx > hx * 1.1 ? 'The joining rider absorbs ' + (jx / Math.max(hx, 0.001)).toFixed(1) + '× as much extra time, and their fare is scaled down by that detour.'
+            : 'The two detours are close, so the fares are close.');
       }
-      body3 += '<span class="so">A fairer promise would bound door-to-door time against the solo option, and price the detour each rider actually absorbs instead of a flat Y.</span>';
+      body3 += '<span class="so">The cap uses the solo cab that was in range at assignment. It does not look at the other city. No solo cab nearby, and only the in-car cap applies.</span>';
     }
     var try3 = cfg.maxDetour > 1.25
       ? tryButton({ maxDetour: 1.2 }, 'Try a tighter promise: 1.20×')
       : tryButton({ maxDetour: 1.5 }, 'Try the 1.50× promise');
-    cards.push({ n: 3, title: 'The ' + cfg.maxDetour.toFixed(2) + '× promise covers the ride, not the trip, and not equally.', body: body3, action: try3 });
+    cards.push({ n: 3, title: 'Door-to-door time stays within the solo option that was available.', body: body3, action: try3 });
 
     return cards.map(function (c) {
       return '<article class="insight"><div class="insight-n">' + c.n + '</div><div><h4>' + c.title + '</h4><p>' + c.body + '</p>' + c.action + '</div></article>';
@@ -780,9 +785,9 @@
       + compareTable(s) + '</section>'
 
       + '<footer class="method"><b>How this is measured.</b> Two cities run side by side with identical riders (request time, origin, destination, opt-in) and identical cab start positions; the only difference is whether pool matching is allowed. '
-      + 'Matching runs every second, oldest request first, and only pings cabs that can reach the pickup within ' + cfg.pingRadius + ' blocks of driving. Solo riders get a free cab; pool riders can also be slotted anywhere into a pool cab’s remaining stops, '
-      + 'provided no one ever has more than one co-rider at a time, every pool rider stays within ' + cfg.maxDetour.toFixed(2) + '× their solo time, and no promised pickup slips more than ' + cfg.pickupSlip + ' s. '
-      + 'Passenger time and savings count trips completed by P; driver pay, time and distance accrue up to P; fares are charged upfront at pickup.'
+      + 'Matching runs every second: in-range pairs are scored by insertion cost minus time already waited, the best pairs are assigned, and a pool cab may then fill its other seat. Solo riders get a free cab; pool riders can also be slotted into a pool cab’s remaining stops, '
+      + 'provided no one ever has more than one co-rider at a time, every pool rider stays within ' + cfg.maxDetour.toFixed(2) + '× their in-car estimate (and that times the solo door-to-door, when a solo cab was in range), and no promised pickup slips more than ' + cfg.pickupSlip + ' s. '
+      + 'A pool fare is quoted at pickup and settled at drop-off. Driver pay accrues per occupied second, plus a fuel top-up at drop-off when the fare already covered it.'
       + (cutoff ? ' This run was stopped before P, so these are interim numbers.' : '') + '</footer>';
   }
 

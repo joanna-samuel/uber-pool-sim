@@ -3,11 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f4f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
   <title>PoolSim</title>
   <meta name="description" content="Simulate two-seat ride pooling on a Manhattan grid against a no-pool twin city.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <a class="skip" href="#main">Skip to maps</a>
   <header class="topbar">
     <div class="brand">
       <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
@@ -34,7 +37,7 @@
         <span class="status" id="status">Ready</span>
         <span class="clock-time"><b id="clock">0.0 s</b> of <span id="clock-total">300 s</span></span>
       </div>
-      <div class="progress"><div class="progress-fill" id="progress"></div></div>
+      <div class="progress" id="progress-track" role="progressbar" aria-label="Run progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="progress-fill" id="progress"></div></div>
     </div>
 
     <button id="btn-report" class="btn" type="button" disabled>Report</button>
@@ -50,7 +53,7 @@
       </div>
     </aside>
 
-    <main>
+    <main id="main">
       <section class="maps">
         <figure class="map-card">
           <figcaption class="map-head">
@@ -60,7 +63,7 @@
             </div>
             <div class="map-stats" id="stats-pool"></div>
           </figcaption>
-          <div class="canvas-wrap"><canvas id="map-pool" aria-label="Map of the city with pooling"></canvas></div>
+          <div class="canvas-wrap"><canvas id="map-pool" tabindex="0" aria-label="Map of the city with pooling. Arrow keys inspect cabs."></canvas></div>
         </figure>
         <figure class="map-card">
           <figcaption class="map-head">
@@ -70,22 +73,23 @@
             </div>
             <div class="map-stats" id="stats-base"></div>
           </figcaption>
-          <div class="canvas-wrap"><canvas id="map-base" aria-label="Map of the same city without pooling"></canvas></div>
+          <div class="canvas-wrap"><canvas id="map-base" tabindex="0" aria-label="Map of the same city without pooling. Arrow keys inspect cabs."></canvas></div>
         </figure>
       </section>
 
       <ul class="legend" aria-label="Map legend">
-        <li><i class="sw cab solo"></i>Solo ride</li>
-        <li><i class="sw cab pool1"></i>Pool, 1 aboard</li>
-        <li><i class="sw cab shared"></i>Pool, 2 aboard</li>
-        <li><i class="sw cab ring"></i>Driving to pickup</li>
-        <li><i class="sw cab idle"></i>Idle cab</li>
-        <li><i class="sw rider"></i>Rider waiting (pulses until matched)</li>
-        <li><i class="sw drop"></i>Drop-off</li>
-        <li><i class="sw ping"></i>Ping radius of a new request</li>
-        <li><i class="sw reroute"></i>Bold route: rerouted mid-ride</li>
-        <li><i class="sw lost"></i>Rider gave up</li>
-        <li class="legend-hint">Hover a cab for its riders</li>
+        <li><i class="sw cab solo" aria-hidden="true"></i>Solo ride</li>
+        <li><i class="sw cab pool1" aria-hidden="true"></i>Pool, 1 aboard</li>
+        <li><i class="sw cab shared" aria-hidden="true"></i>Pool, 2 aboard</li>
+        <li><i class="sw cab ring" aria-hidden="true"></i>Driving to pickup</li>
+        <li><i class="sw cab idle" aria-hidden="true"></i>Idle cab</li>
+        <li><i class="sw rider" aria-hidden="true"></i>Rider waiting (pulses until matched)</li>
+        <li><i class="sw drop" aria-hidden="true"></i>Drop-off</li>
+        <li><i class="sw ping" aria-hidden="true"></i>Ping radius of a new request</li>
+        <li><i class="sw reroute" aria-hidden="true"></i>Bold route: rerouted mid-ride</li>
+        <li><i class="sw lost" aria-hidden="true"></i>Rider gave up</li>
+        <li><i class="sw threat" aria-hidden="true"></i>Closed area</li>
+        <li class="legend-hint">Hover a cab, or focus a map and use the arrow keys</li>
       </ul>
 
       <section class="live" id="live" aria-label="Live comparison"></section>
@@ -96,7 +100,8 @@
     <div class="report-panel" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="report-title" id="report-panel"></div>
   </div>
 
-  <div class="tooltip" id="tooltip" hidden></div>
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <div class="sr" id="cab-live" aria-live="polite"></div>
 
   <script src="js/sim.js"></script>
   <script src="js/metrics.js"></script>

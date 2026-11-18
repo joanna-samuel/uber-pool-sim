@@ -17,6 +17,9 @@
  *  - Hard rules checked on every insertion, for every rider in the plan:
  *      * never more than 2 riders aboard at any point of the plan;
  *      * a pool rider's in-car time <= maxDetour x their estimate;
+ *      * a pool rider who had a solo cab in range at assignment finishes
+ *        within maxDetour x that solo door-to-door (wait already elapsed
+ *        plus that cab's drive plus the estimate);
  *      * an assigned rider's pickup slips at most pickupSlip seconds past
  *        the time they were promised;
  *      * the new rider's pickup is within pingRadius blocks of driving.
@@ -28,8 +31,11 @@
  *    A trip is accepted only when the new rider's fare covers the extra pay
  *    and the extra fuel. Any fuel the time-pay misses is topped up at that
  *    rider's drop-off, so a driver's projected net never goes below zero.
- *  - Rider fare: fareRate x estimate, x(1 - Y) for pool opt-ins, charged at
- *    pickup whether or not a co-rider is ever found.
+ *  - Rider fare: quoted at pickup as fareRate x estimate, x(1 - Y) for a pool
+ *    opt-in. Settled at drop-off: the full fare if they never shared, otherwise
+ *    the quote x (estimate / time in the car). A pool insertion is priced on
+ *    that settled plan, so the new fare has to fund any refund to someone
+ *    already aboard as well as the extra pay and fuel.
  */
 // Wrapped in a named factory so app.js can also boot it inside a Web Worker.
 function definePoolSim(root) {
@@ -61,6 +67,8 @@ function definePoolSim(root) {
   var MAX_PLAN_STOPS = 6;     // pending stops a cab may hold
   var VEHICLE_WEIGHT = 0.5;   // value of a cab-second relative to a rider-second
   var MAX_QUEUE_SCAN = 250;   // riders considered per dispatch batch (oldest first)
+  var THREAT_RADIUS = 6;      // manhattan blocks, fixed
+  var THREAT_FRACTION = 0.45; // of the run, then the diamond closes
   var REASSIGN_MIN_GAIN = 8;  // seconds of pickup a re-dispatch must save...
   var REASSIGN_MIN_RATIO = 0.7; // ...and the new ETA must be <= 70% of the old
   var EPS = 1e-6;
@@ -121,7 +129,11 @@ function definePoolSim(root) {
     }
     riders.sort(function (a, b) { return a.requestAt - b.requestAt; });
     riders.forEach(function (r, idx) { r.id = idx; });
-    return { cabs: cabs, riders: riders };
+    var threatAt = node();
+    return {
+      cabs: cabs, riders: riders,
+      threat: { x: threatAt.x, y: threatAt.y, r: THREAT_RADIUS, at: cfg.duration * THREAT_FRACTION },
+    };
   }
 
   function World(cfg, scenario, poolEnabled) {
@@ -137,6 +149,8 @@ function definePoolSim(root) {
     this.queue = [];
     this.series = [];
     this.lostLog = [];
+    this.threat = scenario.threat;
+    this.threatOn = false;
     this.totals = {
       revenue: 0, driverPay: 0, premium: 0, discount: 0, topUp: 0,
       requested: 0, pickedUp: 0, completed: 0, lost: 0, waitSum: 0,
@@ -178,17 +192,129 @@ function definePoolSim(root) {
         joinedOccupied: false,  // boarded a cab that already had a rider
         hosted: false,          // someone boarded while this rider was aboard
         topUp: 0,               // fuel the time-pay misses; paid at drop-off
+        soloDoor: null,         // solo door-to-door available at assignment
+        soloChecked: false,
       };
     });
   }
 
+  World.prototype.zone = function (x, y) {
+    if (!this.threatOn) return false;
+    var z = this.threat;
+    return manhattan(x, y, z.x, z.y) <= z.r;
+  };
+
+  // Nearest grid point just outside the diamond. Null when (x, y) is already outside.
+  World.prototype.exitCell = function (x, y) {
+    var z = this.threat, G = this.cfg.gridSize;
+    if (manhattan(x, y, z.x, z.y) > z.r) return null;
+    var ex = x, ey = y, dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (var n = 0; n < G * 2 && manhattan(ex, ey, z.x, z.y) <= z.r; n++) {
+      var best = null, bestD = manhattan(ex, ey, z.x, z.y);
+      for (var d = 0; d < 4; d++) {
+        var nx = ex + dirs[d][0], ny = ey + dirs[d][1];
+        if (nx < 0 || ny < 0 || nx >= G || ny >= G) continue;
+        var dist = manhattan(nx, ny, z.x, z.y);
+        if (dist > bestD) { bestD = dist; best = [nx, ny]; }
+      }
+      if (!best) break;
+      ex = best[0]; ey = best[1];
+    }
+    return { x: ex, y: ey };
+  };
+
+  World.prototype.loseUnpicked = function (cab, r) {
+    if (r.state !== 'assigned') return;
+    r.state = 'lost';
+    r.lostAt = this.t;
+    r.cab = null;
+    r.topUp = 0;
+    this.totals.lost++;
+    this.lostLog.push(r.id);
+    var i = cab.riders.indexOf(r);
+    if (i >= 0) cab.riders.splice(i, 1);
+  };
+
+  // Pay whatever the open plan still lacks, so fleeing the zone cannot sink the driver.
+  World.prototype.makeWhole = function (cab) {
+    var net = this.projectedNet(cab);
+    if (net >= -EPS) return;
+    var gap = -net;
+    cab.earnings += gap;
+    cab.topUpPaid += gap;
+    this.totals.driverPay += gap;
+    this.totals.topUp += gap;
+  };
+
+  World.prototype.clearCab = function (cab) {
+    var cancel = [], kept = [], i, s;
+    for (i = 0; i < cab.plan.length; i++) {
+      s = cab.plan[i];
+      if (s.type === 'exit') continue;
+      if (s.type === 'pickup' && (this.zone(s.x, s.y) || this.zone(s.rider.dx, s.rider.dy))) {
+        if (s.rider.state === 'assigned') cancel.push(s.rider);
+        continue;
+      }
+      if (s.type === 'dropoff' && this.zone(s.x, s.y)) continue;
+      kept.push(s);
+    }
+    for (i = 0; i < cancel.length; i++) this.loseUnpicked(cab, cancel[i]);
+    kept = kept.filter(function (stop) { return !stop.rider || stop.rider.state !== 'lost'; });
+    var px = cab.next ? cab.next.x : cab.x;
+    var py = cab.next ? cab.next.y : cab.y;
+    var dropAt = { x: px, y: py };
+    var leaving = false;
+    for (i = 0; i < kept.length; i++) if (!this.zone(kept[i].x, kept[i].y)) leaving = true;
+    if (this.zone(px, py) && !leaving) {
+      var exit = this.exitCell(px, py);
+      if (exit) {
+        dropAt = exit;
+        kept.unshift({ type: 'exit', x: exit.x, y: exit.y });
+      }
+    }
+    for (i = cab.onboard.length - 1; i >= 0; i--) {
+      var rider = cab.onboard[i];
+      var still = false;
+      for (var k = 0; k < kept.length; k++) if (kept[k].type === 'dropoff' && kept[k].rider === rider) still = true;
+      if (!still) kept.splice(kept[0] && kept[0].type === 'exit' ? 1 : 0, 0, { type: 'dropoff', rider: rider, x: dropAt.x, y: dropAt.y });
+    }
+    cab.plan = kept;
+    cab.planVersion++;
+    if (cab.onboard.length) cab.rerouteVersion++;
+    this.makeWhole(cab);
+  };
+
+  World.prototype.closeZone = function () {
+    this.threatOn = true;
+    var keep = [];
+    for (var q = 0; q < this.queue.length; q++) {
+      var r = this.queue[q];
+      if (this.zone(r.ox, r.oy) || this.zone(r.dx, r.dy)) {
+        r.state = 'lost';
+        r.lostAt = this.t;
+        this.totals.lost++;
+        this.lostLog.push(r.id);
+      } else keep.push(r);
+    }
+    this.queue = keep;
+    for (var i = 0; i < this.cabs.length; i++) this.clearCab(this.cabs[i]);
+  };
+
   World.prototype.step = function () {
+    if (!this.threatOn && this.t >= this.threat.at - EPS) this.closeZone();
     // Riders who requested before this instant join the queue.
     while (this.arrivalIdx < this.riders.length && this.riders[this.arrivalIdx].requestAt <= this.t) {
       var r = this.riders[this.arrivalIdx++];
+      this.totals.requested++;
+      if (this.zone(r.ox, r.oy) || this.zone(r.dx, r.dy)) {
+        r.state = 'lost';
+        r.lostAt = this.t;
+        this.totals.lost++;
+        this.lostLog.push(r.id);
+        continue;
+      }
       r.state = 'waiting';
       this.queue.push(r);
-      this.totals.requested++;
     }
     if (this.t >= this.nextDispatchAt - EPS) {
       this.dispatch();
@@ -268,8 +394,9 @@ function definePoolSim(root) {
   World.prototype.serveStops = function (cab, now) {
     while (cab.plan.length && cab.plan[0].x === cab.x && cab.plan[0].y === cab.y) {
       var stop = cab.plan.shift();
-      var r = stop.rider;
       cab.planVersion++;
+      if (stop.type === 'exit') continue;
+      var r = stop.rider;
       if (stop.type === 'pickup') {
         if (cab.onboard.length === 1) {
           var host = cab.onboard[0];
@@ -281,13 +408,12 @@ function definePoolSim(root) {
         cab.onboard.push(r);
         r.state = 'riding';
         r.pickupAt = now;
-        r.fare = r.fullFare * (r.pool ? 1 - this.Y : 1);
+        r.fare = this.quotedFare(r);
         this.totals.revenue += r.fare;
         this.totals.discount += r.fullFare - r.fare;
         this.totals.pickedUp++;
         this.totals.waitSum += now - r.requestAt;
       } else {
-        // ponytail: one lump at drop-off, not a per-block ledger
         if (r.topUp) {
           cab.earnings += r.topUp;
           cab.topUpPaid += r.topUp;
@@ -295,6 +421,11 @@ function definePoolSim(root) {
           this.totals.topUp += r.topUp;
           r.topUp = 0;
         }
+        var earned = this.settledFare(r, now - r.pickupAt, r.sharedSec > EPS);
+        var adj = earned - r.fare;
+        r.fare = earned;
+        this.totals.revenue += adj;
+        this.totals.discount -= adj;
         cab.onboard.splice(cab.onboard.indexOf(r), 1);
         cab.riders.splice(cab.riders.indexOf(r), 1);
         r.state = 'done';
@@ -326,8 +457,18 @@ function definePoolSim(root) {
     var maxPick = this.cfg.pingRadius / speed;
     var rate = this.cfg.driverRate, prem = this.X, cost = this.cfg.costPerBlock;
     var t = this.t, x, y, pay = 0, fuel = 0, load = cab.onboard.length;
+    var aboard = [], shared = {}, seen = {};
+    function note(r) { seen[r.id] = r; }
+    for (var a = 0; a < cab.onboard.length; a++) {
+      aboard.push(cab.onboard[a]);
+      note(cab.onboard[a]);
+      if (cab.onboard[a].sharedSec > EPS) shared[cab.onboard[a].id] = true;
+    }
     function leg(blocks) {
       if (!(blocks > 0)) return;
+      if (load >= 2) {
+        for (var u = 0; u < aboard.length; u++) shared[aboard[u].id] = true;
+      }
       fuel += cost * blocks;
       if (load === 1) pay += rate * blocks / speed;
       else if (load >= 2) pay += rate * (1 + prem) * blocks / speed;
@@ -344,8 +485,11 @@ function definePoolSim(root) {
       var s = plan[i], r = s.rider;
       leg(manhattan(x, y, s.x, s.y));
       x = s.x; y = s.y;
+      if (s.type === 'exit') continue;
       if (s.type === 'pickup') {
         load++;
+        aboard.push(r);
+        note(r);
         if (check) {
           if (load > 2) return null;
           if (r === newRider) {
@@ -358,17 +502,44 @@ function definePoolSim(root) {
         picks[r.id] = t;
       } else {
         load--;
+        for (var u = aboard.length - 1; u >= 0; u--) if (aboard[u] === r) { aboard.splice(u, 1); break; }
         var pt = r.state === 'riding' ? r.pickupAt : picks[r.id];
         if (check && t - pt > limit * r.est + EPS) return null;
+        var bench = r.soloChecked ? r.soloDoor
+          : (r._offer == null ? null : (this.t - r.requestAt) + r._offer + r.est);
+        if (check && r.pool && bench != null && t - r.requestAt > limit * bench + EPS) return null;
         drops[r.id] = t;
       }
     }
-    return { end: t, picks: picks, drops: drops, newPick: newPick, pay: pay, fuel: fuel };
+    var fareOf = {};
+    for (var id in seen) {
+      var rr = seen[id];
+      var drop = drops[rr.id];
+      var pick = rr.state === 'riding' ? rr.pickupAt : picks[rr.id];
+      if (drop == null || pick == null) continue;
+      fareOf[rr.id] = this.settledFare(rr, drop - pick, !!shared[rr.id]);
+    }
+    return { end: t, picks: picks, drops: drops, newPick: newPick, pay: pay, fuel: fuel, fareOf: fareOf };
   };
 
-  // Fare charged for r under the current price. Phase-2 settlement replaces this.
+  // Quoted at pickup. Pool opt-ins are quoted the flat discount; drop-off settles it.
   World.prototype.quotedFare = function (r) {
     return r.fullFare * (r.pool ? 1 - this.Y : 1);
+  };
+
+  // Full fare unless the rider shared. A shared trip pays the flat discount
+  // scaled by estimate / time in the car, and never more than the flat discount.
+  World.prototype.settledFare = function (r, inCar, shared) {
+    if (!r.pool || !shared || !(inCar > 0)) return r.fullFare;
+    var flat = r.fullFare * (1 - this.Y);
+    var scaled = flat * (r.est / inCar);
+    return scaled < flat ? scaled : flat;
+  };
+
+  World.prototype.fareSum = function (fareOf) {
+    var s = 0;
+    for (var id in fareOf) s += fareOf[id];
+    return s;
   };
 
   // Null when `fare` does not cover the extra time-pay and the extra fuel.
@@ -406,10 +577,13 @@ function definePoolSim(root) {
   // rider-seconds): the new rider's wait, every extra in-car or waiting second
   // the change imposes on anyone, plus a weight on the extra cab-seconds.
   World.prototype.bestInsertion = function (cab, r) {
+    if (this.zone(r.ox, r.oy) || this.zone(r.dx, r.dy)) return null;
+    if (this.zone(cab.next ? cab.next.x : cab.x, cab.next ? cab.next.y : cab.y)) return null;
     var base = this.baseEval(cab);
     var P = pickupStop(r), D = dropoffStop(r);
     var S = cab.plan, n = S.length, best = null;
-    for (var i = 0; i <= n; i++) {
+    var first = S.length && S[0].type === 'exit' ? 1 : 0;
+    for (var i = first; i <= n; i++) {
       for (var j = i; j <= n; j++) {
         var plan = S.slice(0, i);
         plan.push(P);
@@ -418,7 +592,8 @@ function definePoolSim(root) {
         for (k = j; k < n; k++) plan.push(S[k]);
         var res = this.evalPlan(cab, plan, r, true);
         if (!res) continue;
-        var gap = this.fuelGap(this.quotedFare(r), res.pay - base.pay, res.fuel - base.fuel);
+        var dFare = this.fareSum(res.fareOf) - this.fareSum(base.fareOf);
+        var gap = this.fuelGap(dFare, res.pay - base.pay, res.fuel - base.fuel);
         if (gap == null) continue;
         var delay = 0;
         for (var id in base.drops) delay += res.drops[id] - base.drops[id];
@@ -462,6 +637,10 @@ function definePoolSim(root) {
     r.promisedPickupAt = opt.res.newPick;
     r.latestPickupAt = opt.res.newPick + cfg.pickupSlip;
     r.topUp = opt.topUp || 0;
+    if (r.pool && !r.soloChecked) {
+      r.soloChecked = true;
+      r.soloDoor = r._offer == null ? null : (this.t - r.requestAt) + r._offer + r.est;
+    }
   };
 
   // ---------------------------------------------------------------- dispatch
@@ -497,46 +676,62 @@ function definePoolSim(root) {
     if (cfg.reassign && idle.length) this.redispatch(idle);
   };
 
+  // Drive time of the closest idle cab inside the ping radius, or null.
+  World.prototype.soloOffer = function (r, idle) {
+    var best = Infinity, radius = this.cfg.pingRadius;
+    for (var i = 0; i < idle.length; i++) {
+      var d = this.reach(idle[i], r.ox, r.oy);
+      if (d <= radius + EPS && d < best) best = d;
+    }
+    return best < Infinity ? best / this.speed : null;
+  };
+
   World.prototype.matchQueue = function (idle, poolable) {
-    var radius = this.cfg.pingRadius;
-    var remaining = [];
-    var scanned = 0;
-    for (var q = 0; q < this.queue.length; q++) {
+    var radius = this.cfg.pingRadius, now = this.t, world = this;
+    var considered = [];
+    for (var q = 0; q < this.queue.length && considered.length < MAX_QUEUE_SCAN; q++) {
       var r = this.queue[q];
-      if (scanned >= MAX_QUEUE_SCAN || (!idle.length && !(r.pool && poolable.length))) {
-        remaining.push(r);
-        continue;
-      }
-      scanned++;
-      var best = null, opt, j, c;
-      // Ping only cabs whose direct drive to the pickup fits in the radius.
-      for (j = 0; j < idle.length; j++) {
-        c = idle[j];
-        if (this.reach(c, r.ox, r.oy) > radius + EPS) continue;
-        opt = this.bestInsertion(c, r);
-        if (opt && (!best || opt.cost < best.cost)) best = opt;
-      }
-      if (r.pool) {
-        for (j = 0; j < poolable.length; j++) {
-          c = poolable[j];
-          if (this.reach(c, r.ox, r.oy) > radius + EPS) continue;
-          opt = this.bestInsertion(c, r);
-          if (opt && (!best || opt.cost < best.cost)) best = opt;
+      if (!idle.length && !(r.pool && poolable.length)) continue;
+      if (r.pool && !r.soloChecked) r._offer = this.soloOffer(r, idle);
+      considered.push(r);
+    }
+    function gather(cabs) {
+      var pairs = [];
+      for (var i = 0; i < considered.length; i++) {
+        var rider = considered[i];
+        if (rider.state !== 'waiting') continue;
+        for (var j = 0; j < cabs.length; j++) {
+          var cab = cabs[j];
+          if (cab.riders.length && !rider.pool) continue;
+          if (world.reach(cab, rider.ox, rider.oy) > radius + EPS) continue;
+          var opt = world.bestInsertion(cab, rider);
+          if (!opt) continue;
+          pairs.push({ r: rider, opt: opt, score: opt.cost - (now - rider.requestAt) });
         }
       }
-      if (!best) {
-        remaining.push(r);
-        continue;
+      pairs.sort(function (a, b) {
+        return a.score - b.score || a.r.id - b.r.id || a.opt.cab.id - b.opt.cab.id;
+      });
+      return pairs;
+    }
+    function assign(pairs) {
+      var used = {}, taken = [];
+      for (var i = 0; i < pairs.length; i++) {
+        var rider = pairs[i].r, opt = pairs[i].opt, cab = opt.cab;
+        if (rider.state !== 'waiting' || used[cab.id]) continue;
+        world.commit(opt, rider);
+        used[cab.id] = true;
+        taken.push(cab);
       }
-      var cab = best.cab;
-      var wasIdle = !cab.riders.length;
-      this.commit(best, r);
-      if (wasIdle) {
-        idle.splice(idle.indexOf(cab), 1);
-        if (r.pool && this.isPoolCab(cab)) poolable.push(cab);
-      } else if (!this.isPoolCab(cab)) {
-        poolable.splice(poolable.indexOf(cab), 1);
-      }
+      return taken;
+    }
+    var first = assign(gather(idle.concat(poolable)));
+    var second = [];
+    for (var i = 0; i < first.length; i++) if (this.isPoolCab(first[i])) second.push(first[i]);
+    if (second.length) assign(gather(second));
+    var remaining = [];
+    for (q = 0; q < this.queue.length; q++) {
+      if (this.queue[q].state === 'waiting') remaining.push(this.queue[q]);
     }
     this.queue = remaining;
   };
@@ -553,6 +748,7 @@ function definePoolSim(root) {
       var waiting = c.riders.filter(function (r) { return r.state === 'assigned'; });
       for (var w = 0; w < waiting.length && idle.length; w++) {
         var r = waiting[w];
+        if (this.zone(r.ox, r.oy) || this.zone(r.dx, r.dy)) continue;
         var cur = this.baseEval(c).picks[r.id] - this.t;
         if (cur < REASSIGN_MIN_GAIN) continue;
         var bestCab = null, bestEta = Infinity;
@@ -567,7 +763,7 @@ function definePoolSim(root) {
         var neu = [pickupStop(r), dropoffStop(r)];
         var base = this.evalPlan(bestCab, bestCab.plan, null, false);
         var res = this.evalPlan(bestCab, neu, r, true);
-        var gap = res && this.fuelGap(this.quotedFare(r), res.pay - base.pay, res.fuel - base.fuel);
+        var gap = res && this.fuelGap(this.fareSum(res.fareOf) - this.fareSum(base.fareOf), res.pay - base.pay, res.fuel - base.fuel);
         if (gap == null) continue;
 
         c.plan = stripped;

@@ -20,7 +20,7 @@
       group: 'Pool rules', items: [
         { key: 'maxDetour', label: 'Max time in car vs. solo', unit: '×', min: 1, max: 3, step: 0.05, decimals: 2, hint: 'Checked for both riders before every match.' },
         { key: 'driverPremium', label: 'Driver premium', sym: 'X', unit: '%', min: 0, max: 100, step: 5, hint: 'Extra pay per second while 2 riders are aboard.' },
-        { key: 'poolDiscount', label: 'Pool rider discount', sym: 'Y', unit: '%', min: 0, max: 90, step: 5 },
+        { key: 'poolDiscount', label: 'Pool rider discount', sym: 'Y', unit: '%', min: 0, max: 90, step: 5, hint: 'Only a trip that shares gets it, and a longer detour pays less.' },
       ],
     },
     {
@@ -52,8 +52,9 @@
   var els = {
     config: $('config'), sidebar: document.querySelector('.sidebar'),
     start: $('btn-start'), startLabel: $('btn-start-label'), reset: $('btn-reset'), reportBtn: $('btn-report'),
-    defaults: $('btn-defaults'), speed: $('speed'), status: $('status'), clock: $('clock'),
-    clockTotal: $('clock-total'), progress: $('progress'),
+    defaults: $('btn-defaults'), speed: $('speed'), status: $('status'),     clock: $('clock'),
+    clockTotal: $('clock-total'), progress: $('progress'), progressTrack: $('progress-track'),
+    cabLive: $('cab-live'),
     statsPool: $('stats-pool'), statsBase: $('stats-base'), subPool: $('sub-pool'),
     live: $('live'), report: $('report'), reportPanel: $('report-panel'), tooltip: $('tooltip'),
   };
@@ -97,8 +98,8 @@
       g.items.forEach(function (c) {
         var id = 'in-' + c.key;
         if (c.toggle) {
-          html += '<div class="ctl"><div class="ctl-head"><label for="' + id + '">' + c.label + '</label>'
-            + '<label class="switch"><input type="checkbox" id="' + id + '" data-key="' + c.key + '"><span class="track"></span></label></div>'
+          html += '<div class="ctl"><label class="ctl-head"><span>' + c.label + '</span>'
+            + '<span class="switch"><input type="checkbox" id="' + id + '" name="' + c.key + '" autocomplete="off" data-key="' + c.key + '"><span class="track"></span></span></label>'
             + (c.hint ? '<p class="ctl-hint">' + c.hint + '</p>' : '') + '</div>';
           return;
         }
@@ -106,9 +107,9 @@
           + '<label for="' + id + '">' + c.label + (c.sym ? ' <span class="sym">' + c.sym + '</span>' : '') + '</label>'
           + '<span class="ctl-val">'
           + (c.noSlider ? '<button class="dice" type="button" id="dice" title="New random seed" aria-label="New random seed">Shuffle</button>' : '')
-          + '<input type="number" id="' + id + '" data-key="' + c.key + '" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '">'
+          + '<input type="number" id="' + id + '" name="' + c.key + '" autocomplete="off" inputmode="' + (c.decimals ? 'decimal' : 'numeric') + '" data-key="' + c.key + '" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '">'
           + (c.unit ? '<span>' + c.unit + '</span>' : '') + '</span></div>'
-          + (c.noSlider ? '' : '<input type="range" data-key="' + c.key + '" aria-label="' + c.label + '" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '">')
+          + (c.noSlider ? '' : '<input type="range" name="' + c.key + '" autocomplete="off" data-key="' + c.key + '" aria-label="' + c.label + '" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '">')
           + (c.hint ? '<p class="ctl-hint">' + c.hint + '</p>' : '') + '</div>';
       });
       html += '</section>';
@@ -326,7 +327,9 @@
     els.status.innerHTML = statusText();
     els.clock.textContent = sim.t.toFixed(1) + ' s';
     els.clockTotal.textContent = cfg.duration + ' s';
-    els.progress.style.width = Math.min(100, sim.t / cfg.duration * 100) + '%';
+    var pct = Math.min(100, Math.max(0, sim.t / cfg.duration * 100));
+    els.progress.style.width = pct + '%';
+    els.progressTrack.setAttribute('aria-valuenow', String(Math.round(pct)));
     els.reportBtn.disabled = !(sim.t > 0 && state.status !== 'running');
     els.subPool.textContent = cfg.poolOptIn + '% opt in · cap ' + cfg.maxDetour.toFixed(2) + '×';
 
@@ -344,7 +347,7 @@
       + tile('Average wait for pickup', fmt.sec(lp.avgWait),
         (waitDelta == null ? '' : chip(waitDelta, false, fmt.signedSec(waitDelta))) + '<span>vs ' + fmt.sec(lb.avgWait) + ' without Pool</span>')
       + tile('Pool riders saved', fmt.money(ps.saved),
-        '<span>' + fmt.int(ps.n) + ' completed pool trips · ' + cfg.poolDiscount + '% off</span>')
+        '<span>' + fmt.int(ps.n) + ' completed pool trips · discount only if they shared</span>')
       + tile('Extra time in the car', ps.avgExtra == null ? '—' : fmt.signedPct(ps.avgExtra, 1),
         '<span>pool riders, vs solo estimate · worst ' + fmt.ratio(ps.worst) + ' of ' + cfg.maxDetour.toFixed(2) + '×</span>')
       + tile('Driver earnings', fmt.money(lp.driverPay),
@@ -417,6 +420,29 @@
       }
     });
     canvas.addEventListener('mouseleave', function () {
+      if (document.activeElement === canvas) return;
+      view.hoverCab = null;
+      state.hover = null;
+      hideTip();
+    });
+    canvas.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      var cabs = view.world && view.world.cabs;
+      if (!cabs || !cabs.length) return;
+      e.preventDefault();
+      var i = view.hoverCab ? cabs.indexOf(view.hoverCab) : -1;
+      var step = (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ? -1 : 1;
+      var cab = cabs[(i + step + cabs.length) % cabs.length];
+      var p = view.cabPoint(cab);
+      var rect = canvas.getBoundingClientRect();
+      view.hoverCab = cab;
+      state.hover = { view: view, cab: cab, event: { clientX: rect.left + p.x, clientY: rect.top + p.y } };
+      showCabTip(view, cab, state.hover.event);
+      var n = cab.onboard.length;
+      var status = !cab.riders.length ? 'Idle' : n === 2 ? 'carrying 2' : n === 1 ? '1 aboard' : 'driving to pickup';
+      els.cabLive.textContent = 'Cab ' + cab.id + ', ' + status + ', projected net ' + fmt.money(view.world.projectedNet(cab));
+    });
+    canvas.addEventListener('blur', function () {
       view.hoverCab = null;
       state.hover = null;
       hideTip();
@@ -448,6 +474,11 @@
 
   // ------------------------------------------------------------ report
 
+  var reportOpener = null;
+  function setPageInert(on) {
+    document.querySelector('.topbar').inert = on;
+    document.querySelector('.layout').inert = on;
+  }
   function openReport() {
     var sim = state.sim;
     state.hover = null;
@@ -462,7 +493,11 @@
       Report.wireLineChart(svg, showTip, hideTip);
     });
     runSweep(sim.cfg);
-    els.reportPanel.focus();
+    reportOpener = document.activeElement;
+    setPageInert(true);
+    var closeBtn = els.reportPanel.querySelector('[data-close]');
+    if (closeBtn) closeBtn.focus();
+    else els.reportPanel.focus();
   }
 
   // Radius sweep: re-run this city at a range of ping radii. Runs in Web
@@ -574,7 +609,10 @@
     if (els.report.hidden) return;
     els.report.hidden = true;
     document.body.style.overflow = '';
+    setPageInert(false);
     hideTip();
+    if (reportOpener && reportOpener.focus && document.contains(reportOpener)) reportOpener.focus();
+    reportOpener = null;
   }
 
   els.report.addEventListener('click', function (e) {
@@ -618,7 +656,7 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && !els.report.hidden) { closeReport(); return; }
     var tag = (e.target.tagName || '').toLowerCase();
-    if (e.code === 'Space' && tag !== 'input' && tag !== 'button' && els.report.hidden) {
+    if (e.code === 'Space' && tag !== 'input' && tag !== 'button' && tag !== 'canvas' && els.report.hidden) {
       e.preventDefault();
       toggle();
     }

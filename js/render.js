@@ -30,6 +30,7 @@
     this.dpr = 1;
     this.hoverCab = null;
     this.theme = readTheme();
+    this.reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     this.resetEffects();
   }
 
@@ -188,6 +189,22 @@
     ctx.restore();
     ctx.globalAlpha = 1;
 
+    if (w.threatOn && w.threat) {
+      var z = w.threat;
+      var zr = z.r * cell;
+      x = g.pad + z.x * cell; y = g.pad + z.y * cell;
+      ctx.beginPath();
+      ctx.moveTo(x, y - zr); ctx.lineTo(x + zr, y); ctx.lineTo(x, y + zr); ctx.lineTo(x - zr, y); ctx.closePath();
+      ctx.fillStyle = th.bad;
+      ctx.globalAlpha = 0.08;
+      ctx.fill();
+      ctx.globalAlpha = 0.85;
+      ctx.strokeStyle = th.bad;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
     // Planned routes; cabs that just rerouted mid-ride are drawn bold.
     for (i = 0; i < cabs.length; i++) {
       c = cabs[i];
@@ -228,7 +245,7 @@
       if (r.state !== 'waiting' && r.state !== 'assigned') continue;
       x = g.pad + r.ox * cell; y = g.pad + r.oy * cell;
       color = r.pool ? th.pool1 : th.solo;
-      if (r.state === 'waiting') {
+      if (r.state === 'waiting' && !this.reduceMotion.matches) {
         ctx.globalAlpha = 0.55 * (1 - phase);
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;

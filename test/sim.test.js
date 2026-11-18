@@ -56,11 +56,14 @@ test('never more than 2 aboard, now or anywhere in a planned route', () => {
         for (const c of w.cabs) {
           assert(c.onboard.length <= 2, 'aboard > 2');
           let load = c.onboard.length;
+          let riderStops = 0;
           for (const st of c.plan) {
+            if (st.type === 'exit') continue;
+            riderStops++;
             load += st.type === 'pickup' ? 1 : -1;
             assert(load <= 2 && load >= 0, `cab ${c.id} plan load ${load}`);
           }
-          assert(c.plan.length <= S.MAX_PLAN_STOPS, 'plan too long');
+          assert(riderStops <= S.MAX_PLAN_STOPS, 'plan too long');
         }
       }
     });
@@ -83,7 +86,10 @@ test('solo riders (both worlds) ride exactly their estimate and never share', ()
     const s = finished(over);
     for (const r of s.base.riders.concat(s.pool.riders.filter((x) => !x.pool))) {
       if (r.state !== 'done') continue;
-      assert(Math.abs(inCar(r) - r.est) < EPS, `rider ${r.id} solo ride ${inCar(r)} != ${r.est}`);
+      const z = s.pool.threat;
+      const destClosed = S.manhattan(r.dx, r.dy, z.x, z.y) <= z.r && r.dropoffAt >= z.at - EPS;
+      if (destClosed) assert(inCar(r) <= r.est + EPS, `rider ${r.id} evacuation lengthened the ride`);
+      else assert(Math.abs(inCar(r) - r.est) < EPS, `rider ${r.id} solo ride ${inCar(r)} != ${r.est}`);
       assert(r.sharedSec < EPS && r.coRiders.length === 0, `solo rider ${r.id} shared`);
     }
     for (const c of s.base.cabs) assert(c.time.two < EPS, 'baseline cab carried 2');
@@ -113,6 +119,9 @@ test('only unmatched riders give up, and only after their patience runs out', ()
     for (const w of [s.pool, s.base]) {
       for (const r of w.riders) {
         if (r.state !== 'lost') continue;
+        const z = w.threat;
+        const closed = S.manhattan(r.ox, r.oy, z.x, z.y) <= z.r || S.manhattan(r.dx, r.dy, z.x, z.y) <= z.r;
+        if (closed && r.lostAt >= z.at - EPS) continue;
         assert(r.pickupAt == null && r.assignedAt == null, `rider ${r.id} lost after being matched`);
         assert(r.lostAt - r.requestAt >= s.cfg.patience - EPS, `rider ${r.id} gave up early`);
       }
@@ -171,15 +180,70 @@ test('no driver is projected below zero', () => {
   for (const c of thin.base.cabs) assert(thin.base.projectedNet(c) >= -1e-6);
 });
 
-test('pool riders pay (1 - Y) x standard fare, everyone else full fare', () => {
-  const s = runChecked({ poolDiscount: 40 });
+test('a closed area empties out and takes no new trips', () => {
+  const s = finished({});
   for (const w of [s.pool, s.base]) {
+    const z = w.threat;
+    assert(w.threatOn, 'zone never closed');
+    assert.strictEqual(z.r, 6);
+    for (const c of w.cabs) {
+      for (const st of c.plan) assert(S.manhattan(st.x, st.y, z.x, z.y) > z.r, 'stop inside the zone');
+      if (S.manhattan(c.x, c.y, z.x, z.y) <= z.r) {
+        assert(c.plan.length && S.manhattan(c.plan[0].x, c.plan[0].y, z.x, z.y) > z.r,
+          `cab ${c.id} is inside with nowhere outside to go`);
+      }
+    }
     for (const r of w.riders) {
-      if (r.pickupAt == null) continue;
-      const expect = r.fullFare * (r.pool ? 0.6 : 1);
-      assert(Math.abs(r.fare - expect) < 1e-9, `rider ${r.id} fare`);
+      const originIn = S.manhattan(r.ox, r.oy, z.x, z.y) <= z.r;
+      const destIn = S.manhattan(r.dx, r.dy, z.x, z.y) <= z.r;
+      if ((originIn || destIn) && r.requestAt >= z.at - EPS) assert.strictEqual(r.state, 'lost');
+      if (r.pickupAt != null && r.pickupAt >= z.at - EPS) assert(!originIn, `picked up inside after close`);
     }
   }
+});
+
+test('pool door-to-door stays within the solo option offered at assignment', () => {
+  for (const over of SCENARIOS) {
+    const s = finished(over);
+    for (const r of s.pool.riders) {
+      if (!r.pool || r.soloDoor == null || r.dropoffAt == null) continue;
+      const door = r.dropoffAt - r.requestAt;
+      assert(door <= s.cfg.maxDetour * r.soloDoor + EPS,
+        `rider ${r.id}: door ${door.toFixed(2)}s > ${s.cfg.maxDetour} × ${r.soloDoor.toFixed(2)}s`);
+    }
+  }
+});
+
+test('pool discount is settled at drop-off', () => {
+  const s = finished({});
+  const Y = s.cfg.poolDiscount / 100;
+  for (const w of [s.pool, s.base]) {
+    let rev = 0;
+    for (const r of w.riders) {
+      if (r.pickupAt == null) continue;
+      rev += r.fare;
+      if (!r.pool) {
+        assert(Math.abs(r.fare - r.fullFare) < 1e-9, `solo rider ${r.id}`);
+        continue;
+      }
+      const flat = r.fullFare * (1 - Y);
+      if (r.state !== 'done') {
+        assert(Math.abs(r.fare - flat) < 1e-9, `rider ${r.id} quoted before drop-off`);
+        continue;
+      }
+      if (r.sharedSec <= EPS) {
+        assert(Math.abs(r.fare - r.fullFare) < 1e-9, `rider ${r.id} paid a discount without sharing`);
+      } else {
+        const scaled = flat * (r.est / (r.dropoffAt - r.pickupAt));
+        const expect = Math.min(flat, scaled);
+        assert(Math.abs(r.fare - expect) < 1e-6, `rider ${r.id} fare ${r.fare} != ${expect}`);
+        assert(r.fare <= flat + 1e-9, `rider ${r.id} paid more than the flat discount`);
+      }
+    }
+    assert(Math.abs(rev - w.totals.revenue) < 1e-6, 'revenue does not match fares');
+  }
+  assert(s.pool.riders.some((r) => r.pool && r.state === 'done' && r.sharedSec > EPS), 'expected a shared trip');
+  assert(s.pool.riders.some((r) => r.pool && r.state === 'done' && r.sharedSec <= EPS), 'expected an unmatched pool trip');
 });
 
 test('cabs reroute mid-ride and riders can share with more than one co-rider', () => {

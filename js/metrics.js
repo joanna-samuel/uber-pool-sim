@@ -125,6 +125,10 @@ function definePoolMetrics(root) {
     var ratioOf = function (r) { return inCar(r) / r.est; };
     var ratios = poolDone.map(function (r) { return { ratio: ratioOf(r), matched: r.sharedSec > EPS }; });
     var saved = sum(poolDone, function (r) { return r.fullFare - r.fare; });
+    var yRate = cfg.poolDiscount / 100;
+    var kept = sum(unmatched, function (r) { return r.fullFare * yRate; });
+    var detourOff = sum(matched, function (r) { return r.fullFare - r.fare - r.fullFare * yRate; });
+    if (detourOff < 0) detourOff = 0;
     var extraSec = sum(poolDone, function (r) { return inCar(r) - r.est; });
     var maxRatio = ratios.length ? Math.max.apply(null, ratios.map(function (v) { return v.ratio; })) : null;
     var withinCap = ratios.length
@@ -139,6 +143,12 @@ function definePoolMetrics(root) {
     // Who absorbs the detour: the rider already aboard, or the one who joins?
     var hosts = matched.filter(function (r) { return r.hosted && !r.joinedOccupied; });
     var joiners = matched.filter(function (r) { return r.joinedOccupied && !r.hosted; });
+    var doorOffered = 0, doorBroken = 0;
+    poolDone.forEach(function (r) {
+      if (r.soloDoor == null) return;
+      doorOffered++;
+      if (doorToDoor(r) > cap * r.soloDoor + EPS) doorBroken++;
+    });
 
     // ---- twin comparison (riders complete in both worlds)
     var poolPairs = [], soloPairs = [];
@@ -184,6 +194,8 @@ function definePoolMetrics(root) {
         saved: saved,
         savedPerRider: poolDone.length ? saved / poolDone.length : null,
         leaked: sum(unmatched, function (r) { return r.fullFare - r.fare; }),
+        kept: kept,
+        detourOff: detourOff,
         extraSec: extraSec,
         detourBlocks: extraSec * cfg.cabSpeed,
         avgExtraSec: poolDone.length ? extraSec / poolDone.length : null,
@@ -200,6 +212,8 @@ function definePoolMetrics(root) {
         joinerRatio: mean(joiners, ratioOf),
         hosts: hosts.length,
         joiners: joiners.length,
+        doorOffered: doorOffered,
+        doorBroken: doorBroken,
       },
       twin: { pool: poolTwin, solo: soloTwin },
       drivers: {
