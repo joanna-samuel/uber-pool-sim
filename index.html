@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PoolSim</title>
+  <meta name="description" content="Simulate two-seat ride pooling on a Manhattan grid against a no-pool twin city.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="8" cy="12" r="5"/><circle cx="16" cy="12" r="5"/>
+      </svg>
+      <div>
+        <div class="brand-name">PoolSim</div>
+        <div class="brand-sub">Two-seat ride pooling on a Manhattan grid</div>
+      </div>
+    </div>
+
+    <div class="transport">
+      <button id="btn-start" class="btn primary" type="button">
+        <svg class="ico ico-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>
+        <svg class="ico ico-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
+        <span id="btn-start-label">Start</span>
+      </button>
+      <button id="btn-reset" class="btn" type="button">Reset</button>
+      <div class="speed" role="group" aria-label="Playback speed" id="speed"></div>
+    </div>
+
+    <div class="clock" aria-live="off">
+      <div class="clock-row">
+        <span class="status" id="status">Ready</span>
+        <span class="clock-time"><b id="clock">0.0 s</b> of <span id="clock-total">300 s</span></span>
+      </div>
+      <div class="progress"><div class="progress-fill" id="progress"></div></div>
+    </div>
+
+    <button id="btn-report" class="btn" type="button" disabled>Report</button>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div id="config"></div>
+      <p class="lock-note" id="lock-note">Settings are locked while a run is in progress. Reset to change them.</p>
+      <div class="sidebar-foot">
+        <button class="link" type="button" id="btn-defaults">Restore defaults</button>
+        <span class="kbd-hint"><kbd>Space</kbd> start / stop</span>
+      </div>
+    </aside>
+
+    <main>
+      <section class="maps">
+        <figure class="map-card">
+          <figcaption class="map-head">
+            <div>
+              <h2>With Pool</h2>
+              <p id="sub-pool">Opt-in riders can share a cab</p>
+            </div>
+            <div class="map-stats" id="stats-pool"></div>
+          </figcaption>
+          <div class="canvas-wrap"><canvas id="map-pool" aria-label="Map of the city with pooling"></canvas></div>
+        </figure>
+        <figure class="map-card">
+          <figcaption class="map-head">
+            <div>
+              <h2>No Pool <span class="tag">baseline</span></h2>
+              <p>Same riders and cabs, everyone rides solo</p>
+            </div>
+            <div class="map-stats" id="stats-base"></div>
+          </figcaption>
+          <div class="canvas-wrap"><canvas id="map-base" aria-label="Map of the same city without pooling"></canvas></div>
+        </figure>
+      </section>
+
+      <ul class="legend" aria-label="Map legend">
+        <li><i class="sw cab solo"></i>Solo ride</li>
+        <li><i class="sw cab pool1"></i>Pool, 1 aboard</li>
+        <li><i class="sw cab shared"></i>Pool, 2 aboard</li>
+        <li><i class="sw cab ring"></i>Driving to pickup</li>
+        <li><i class="sw cab idle"></i>Idle cab</li>
+        <li><i class="sw rider"></i>Rider waiting (pulses until matched)</li>
+        <li><i class="sw drop"></i>Drop-off</li>
+        <li><i class="sw ping"></i>Ping radius of a new request</li>
+        <li><i class="sw reroute"></i>Bold route: rerouted mid-ride</li>
+        <li><i class="sw lost"></i>Rider gave up</li>
+        <li class="legend-hint">Hover a cab for its riders</li>
+      </ul>
+
+      <section class="live" id="live" aria-label="Live comparison"></section>
+    </main>
+  </div>
+
+  <div class="report" id="report" hidden>
+    <div class="report-panel" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="report-title" id="report-panel"></div>
+  </div>
+
+  <div class="tooltip" id="tooltip" hidden></div>
+
+  <script src="js/sim.js"></script>
+  <script src="js/metrics.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/report.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
