@@ -134,20 +134,41 @@ test('every cab-second is idle, empty, 1 aboard or 2 aboard', () => {
   }
 });
 
-test('driver pay = rate x (occupied s + X x 2-aboard s), and sums across cabs', () => {
+test('driver pay = rate x (occupied s + X x 2-aboard s) + fuel top-up, and sums across cabs', () => {
   for (const over of SCENARIOS) {
     const s = finished(over);
     const X = s.cfg.driverPremium / 100;
     for (const w of [s.pool, s.base]) {
       let total = 0;
       for (const c of w.cabs) {
-        const expect = s.cfg.driverRate * (c.time.one + c.time.two + X * c.time.two);
+        const expect = s.cfg.driverRate * (c.time.one + c.time.two + X * c.time.two) + c.topUpPaid;
         assert(Math.abs(c.earnings - expect) < 1e-6, `cab ${c.id} pay mismatch`);
         total += c.earnings;
       }
       assert(Math.abs(total - w.totals.driverPay) < 1e-6, 'fleet pay mismatch');
     }
   }
+});
+
+test('no driver is projected below zero', () => {
+  const cases = SCENARIOS.concat([
+    { costPerBlock: 0.3, pingRadius: 40 },
+    { fareRate: 0.05, costPerBlock: 0.5, driverRate: 0.05, riders: 40, duration: 80 },
+  ]);
+  for (const over of cases) {
+    const s = finished(over);
+    for (const w of [s.pool, s.base]) {
+      for (const c of w.cabs) {
+        assert(w.projectedNet(c) >= -1e-6, `cab ${c.id} projected ${w.projectedNet(c)}`);
+      }
+    }
+  }
+  const broke = finished({ fareRate: 0.05, costPerBlock: 0.5, driverRate: 0.05, riders: 40, duration: 80 });
+  assert.strictEqual(broke.pool.totals.pickedUp, 0);
+  assert.strictEqual(broke.base.totals.pickedUp, 0);
+  const thin = finished({ riders: 40, cabs: 8, duration: 120, driverRate: 0.1, fareRate: 0.5, costPerBlock: 0.2, pingRadius: 20, seed: 1 });
+  assert(thin.base.totals.topUp > 0, 'expected a fuel top-up when time-pay misses fuel');
+  for (const c of thin.base.cabs) assert(thin.base.projectedNet(c) >= -1e-6);
 });
 
 test('pool riders pay (1 - Y) x standard fare, everyone else full fare', () => {
@@ -207,7 +228,7 @@ test('changing the opt-in % does not move riders or cabs', () => {
 test('driver-earnings decomposition adds up to the pool-world total', () => {
   for (const over of SCENARIOS) {
     const d = M.summarize(finished(over)).drivers.steps;
-    const total = d.base + d.lostToSharing + d.detourPay + d.premium + d.fleet;
+    const total = d.base + d.lostToSharing + d.detourPay + d.premium + d.topUp + d.fleet;
     assert(Math.abs(total - d.pool) < 1e-6, 'waterfall does not close');
   }
 });

@@ -25,6 +25,9 @@
  *    to a free cab that can reach them much sooner.
  *  - Driver pay: driverRate per occupied second, x(1 + X) while 2 are aboard.
  *    Driving to a pickup is unpaid. Running cost accrues per block driven.
+ *    A trip is accepted only when the new rider's fare covers the extra pay
+ *    and the extra fuel. Any fuel the time-pay misses is topped up at that
+ *    rider's drop-off, so a driver's projected net never goes below zero.
  *  - Rider fare: fareRate x estimate, x(1 - Y) for pool opt-ins, charged at
  *    pickup whether or not a co-rider is ever found.
  */
@@ -135,7 +138,7 @@ function definePoolSim(root) {
     this.series = [];
     this.lostLog = [];
     this.totals = {
-      revenue: 0, driverPay: 0, premium: 0, discount: 0,
+      revenue: 0, driverPay: 0, premium: 0, discount: 0, topUp: 0,
       requested: 0, pickedUp: 0, completed: 0, lost: 0, waitSum: 0,
       reroutes: 0, reassigned: 0,
     };
@@ -149,7 +152,7 @@ function definePoolSim(root) {
         onboard: [],
         time: { idle: 0, empty: 0, one: 0, two: 0 },
         blocks: { empty: 0, one: 0, two: 0 },
-        earnings: 0, premium: 0, trips: 0, reroutes: 0,
+        earnings: 0, premium: 0, topUpPaid: 0, trips: 0, reroutes: 0,
         planVersion: 0, rerouteVersion: 0,
         _base: null, _baseKey: '',
       };
@@ -174,6 +177,7 @@ function definePoolSim(root) {
         reassigned: 0,          // times moved to a closer cab before pickup
         joinedOccupied: false,  // boarded a cab that already had a rider
         hosted: false,          // someone boarded while this rider was aboard
+        topUp: 0,               // fuel the time-pay misses; paid at drop-off
       };
     });
   }
@@ -283,6 +287,14 @@ function definePoolSim(root) {
         this.totals.pickedUp++;
         this.totals.waitSum += now - r.requestAt;
       } else {
+        // ponytail: one lump at drop-off, not a per-block ledger
+        if (r.topUp) {
+          cab.earnings += r.topUp;
+          cab.topUpPaid += r.topUp;
+          this.totals.driverPay += r.topUp;
+          this.totals.topUp += r.topUp;
+          r.topUp = 0;
+        }
         cab.onboard.splice(cab.onboard.indexOf(r), 1);
         cab.riders.splice(cab.riders.indexOf(r), 1);
         r.state = 'done';
@@ -312,18 +324,25 @@ function definePoolSim(root) {
   World.prototype.evalPlan = function (cab, plan, newRider, check) {
     var speed = this.speed, limit = this.cfg.maxDetour;
     var maxPick = this.cfg.pingRadius / speed;
-    var t = this.t, x, y;
+    var rate = this.cfg.driverRate, prem = this.X, cost = this.cfg.costPerBlock;
+    var t = this.t, x, y, pay = 0, fuel = 0, load = cab.onboard.length;
+    function leg(blocks) {
+      if (!(blocks > 0)) return;
+      fuel += cost * blocks;
+      if (load === 1) pay += rate * blocks / speed;
+      else if (load >= 2) pay += rate * (1 + prem) * blocks / speed;
+      t += blocks / speed;
+    }
     if (cab.next) {
-      t += (1 - cab.progress) / speed;
+      leg(1 - cab.progress);
       x = cab.next.x; y = cab.next.y;
     } else {
       x = cab.x; y = cab.y;
     }
-    var load = cab.onboard.length;
     var picks = {}, drops = {}, newPick = null;
     for (var i = 0; i < plan.length; i++) {
       var s = plan[i], r = s.rider;
-      t += manhattan(x, y, s.x, s.y) / speed;
+      leg(manhattan(x, y, s.x, s.y));
       x = s.x; y = s.y;
       if (s.type === 'pickup') {
         load++;
@@ -344,7 +363,34 @@ function definePoolSim(root) {
         drops[r.id] = t;
       }
     }
-    return { end: t, picks: picks, drops: drops, newPick: newPick };
+    return { end: t, picks: picks, drops: drops, newPick: newPick, pay: pay, fuel: fuel };
+  };
+
+  // Fare charged for r under the current price. Phase-2 settlement replaces this.
+  World.prototype.quotedFare = function (r) {
+    return r.fullFare * (r.pool ? 1 - this.Y : 1);
+  };
+
+  // Null when `fare` does not cover the extra time-pay and the extra fuel.
+  // Otherwise the top-up that makes the driver whole on the fuel gap.
+  World.prototype.fuelGap = function (fare, dPay, dFuel) {
+    if (fare + EPS < dPay || fare + EPS < dFuel) return null;
+    return dFuel > dPay ? dFuel - dPay : 0;
+  };
+
+  World.prototype.fuelSoFar = function (cab) {
+    return this.cfg.costPerBlock * (cab.blocks.empty + cab.blocks.one + cab.blocks.two);
+  };
+
+  // Cash so far, plus the open plan driven to completion, plus top-ups not yet
+  // paid. `plan` / `except` let a re-dispatch try the removal before doing it.
+  World.prototype.projectedNet = function (cab, plan, except) {
+    var pending = 0;
+    for (var i = 0; i < cab.riders.length; i++) {
+      if (cab.riders[i] !== except) pending += cab.riders[i].topUp || 0;
+    }
+    var rem = this.evalPlan(cab, plan == null ? cab.plan : plan, null, false);
+    return cab.earnings - this.fuelSoFar(cab) + rem.pay - rem.fuel + pending;
   };
 
   World.prototype.baseEval = function (cab) {
@@ -372,12 +418,14 @@ function definePoolSim(root) {
         for (k = j; k < n; k++) plan.push(S[k]);
         var res = this.evalPlan(cab, plan, r, true);
         if (!res) continue;
+        var gap = this.fuelGap(this.quotedFare(r), res.pay - base.pay, res.fuel - base.fuel);
+        if (gap == null) continue;
         var delay = 0;
         for (var id in base.drops) delay += res.drops[id] - base.drops[id];
         var cost = (res.newPick - this.t) + (res.drops[r.id] - res.newPick - r.est) + delay
           + VEHICLE_WEIGHT * (res.end - base.end);
         if (!best || cost < best.cost) {
-          best = { cab: cab, plan: plan, cost: cost, res: res, base: base };
+          best = { cab: cab, plan: plan, cost: cost, res: res, base: base, topUp: gap };
         }
       }
     }
@@ -413,6 +461,7 @@ function definePoolSim(root) {
     r.assignedAt = this.t;
     r.promisedPickupAt = opt.res.newPick;
     r.latestPickupAt = opt.res.newPick + cfg.pickupSlip;
+    r.topUp = opt.topUp || 0;
   };
 
   // ---------------------------------------------------------------- dispatch
@@ -512,8 +561,16 @@ function definePoolSim(root) {
           if (d <= radius + EPS && d / speed < bestEta) { bestEta = d / speed; bestCab = idle[j]; }
         }
         if (!bestCab || bestEta > cur - REASSIGN_MIN_GAIN || bestEta > cur * REASSIGN_MIN_RATIO) continue;
+        var stripped = c.plan.filter(function (s) { return s.rider !== r; });
+        // Deadhead already driven stays with this cab. Don't strand it.
+        if (this.projectedNet(c, stripped, r) < -EPS) continue;
+        var neu = [pickupStop(r), dropoffStop(r)];
+        var base = this.evalPlan(bestCab, bestCab.plan, null, false);
+        var res = this.evalPlan(bestCab, neu, r, true);
+        var gap = res && this.fuelGap(this.quotedFare(r), res.pay - base.pay, res.fuel - base.fuel);
+        if (gap == null) continue;
 
-        c.plan = c.plan.filter(function (s) { return s.rider !== r; });
+        c.plan = stripped;
         c.riders.splice(c.riders.indexOf(r), 1);
         c.planVersion++;
         if (c.onboard.length) c.rerouteVersion++;
@@ -526,6 +583,7 @@ function definePoolSim(root) {
         r.promisedPickupAt = this.t + bestEta;
         r.latestPickupAt = r.promisedPickupAt + this.cfg.pickupSlip;
         r.reassigned++;
+        r.topUp = gap;
         this.totals.reassigned++;
 
         idle.splice(idle.indexOf(bestCab), 1);

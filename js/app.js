@@ -36,7 +36,7 @@
         { key: 'gridSize', label: 'Grid', unit: 'per side', min: 10, max: 100, step: 5, hint: 'Intersections per side of the Manhattan grid.' },
         { key: 'cabSpeed', label: 'Cab speed', unit: 'blocks/s', min: 0.5, max: 5, step: 0.5, decimals: 1 },
         { key: 'fareRate', label: 'Standard fare', unit: '$/s', min: 0.05, max: 2, step: 0.05, decimals: 2, hint: 'Per second of the solo estimate. Charged at pickup.' },
-        { key: 'driverRate', label: 'Driver pay', unit: '$/s', min: 0.05, max: 2, step: 0.05, decimals: 2, hint: 'Per second with a rider aboard. Pickup driving is unpaid.' },
+        { key: 'driverRate', label: 'Driver pay', unit: '$/s', min: 0.05, max: 2, step: 0.05, decimals: 2, hint: 'Per occupied second. A trip is refused when the fare does not cover this and the fuel.' },
         { key: 'costPerBlock', label: 'Driver running cost', unit: '$/block', min: 0, max: 0.5, step: 0.01, decimals: 2, hint: 'Fuel and wear per block driven, empty or not.' },
       ],
     },
@@ -393,6 +393,7 @@
     var html = '<div class="tip-title">Cab ' + cab.id + ' · ' + status + '</div>';
     cab.riders.forEach(function (r) { html += riderLine(world, cab, r, times); });
     html += '<div class="tip-rider"><div class="tip-row">Earned<b>' + fmt.money(cab.earnings) + '</b></div>'
+      + '<div class="tip-row tip-muted">Projected net<b>' + fmt.money(world.projectedNet(cab)) + '</b></div>'
       + (cab.premium > 0 ? '<div class="tip-row tip-muted">incl. 2-aboard premium<b>' + fmt.money(cab.premium) + '</b></div>' : '')
       + '<div class="tip-row tip-muted">Trips completed<b>' + cab.trips + '</b></div>'
       + '<div class="tip-row tip-muted">Idle / engaged<b>' + fmt.sec(cab.time.idle, 0) + ' / ' + fmt.sec(cab.time.empty + cab.time.one + cab.time.two, 0) + '</b></div></div>';

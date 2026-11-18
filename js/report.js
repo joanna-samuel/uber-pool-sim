@@ -183,6 +183,7 @@
       { label: 'Shared s\npaid once', value: s.lostToSharing, kind: 'delta' },
       { label: 'Detour s\npaid', value: s.detourPay, kind: 'delta' },
       { label: 'Premium\nX', value: s.premium, kind: 'delta' },
+      { label: 'Fuel\ntop-up', value: s.topUp, kind: 'delta' },
       { label: 'Fleet\neffect', value: s.fleet, kind: 'delta' },
       { label: 'Pool\ncity', value: s.pool, kind: 'total', cls: 'fill-shared' },
     ];
@@ -665,6 +666,12 @@
     }).join('') + '</div>';
   }
 
+  function lowestNet(w) {
+    var m = null;
+    for (var i = 0; i < w.perDriver.length; i++) m = m == null ? w.perDriver[i].net : Math.min(m, w.perDriver[i].net);
+    return m;
+  }
+
   function render(s) {
     var cfg = s.cfg, p = s.passengers, d = s.drivers, pw = s.pool, bw = s.base;
     var stepsTips = {
@@ -672,11 +679,12 @@
       lostToSharing: 'Seconds with two riders aboard are paid once, not twice (completed pool trips).',
       detourPay: 'Extra in-car seconds caused by detours are paid ride time.',
       premium: 'X% extra on every second with two riders aboard.',
+      topUp: 'Fuel the time-pay did not cover. Paid at drop-off, and only when the rider’s fare already covered it.',
       fleet: 'Everything else: more or fewer rides completed by P because pooled cabs free up sooner, plus rides in progress at P.',
       pool: 'Driver pay in the pool city.',
     };
     var w = waterfallChart(d.steps);
-    var keys = ['base', 'lostToSharing', 'detourPay', 'premium', 'fleet', 'pool'];
+    var keys = ['base', 'lostToSharing', 'detourPay', 'premium', 'topUp', 'fleet', 'pool'];
     var k = 0;
     w = w.replace(/data-tip=""/g, function () { var key = keys[k++]; return 'data-tip="' + attr('<b>' + fmt.signedMoney(d.steps[key]) + '</b><br>' + stepsTips[key]) + '"'; });
 
@@ -744,6 +752,7 @@
       + fact('Break-even premium per pooled trip', d.breakEvenX == null ? '—' : d.breakEvenX <= 0 ? 'any X' : '≈ ' + Math.round(d.breakEvenX * 100) + '%', 'X at which a shared trip pays the driver what two solo trips would')
       + fact('Earnings per engaged minute', fmt.money(pw.payPerEngagedMin), fmt.money(bw.payPerEngagedMin) + ' without Pool')
       + fact('Earnings after running cost', fmt.money(pw.netPay / cfg.cabs), 'per driver, at ' + fmt.money(cfg.costPerBlock) + ' a block (' + fmt.money(bw.netPay / cfg.cabs) + ' without Pool)')
+      + fact('Lowest projected net', fmt.money(lowestNet(pw)), 'cash plus the open trip, per driver (' + fmt.money(lowestNet(bw)) + ' without Pool). Below zero means a losing dispatch.')
       + '</div></div>'
 
       + '<figure class="wide mt"><figcaption><b>Where drivers’ time went</b><span>Engaged = driving to a pickup or carrying riders. Idle = parked with no job.</span></figcaption>'

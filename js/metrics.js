@@ -86,10 +86,11 @@ function definePoolMetrics(root) {
       efficiency: blocksTotal > 0 ? riderBlocks / blocksTotal : null,
       runningCost: runningCost,
       netPay: w.totals.driverPay - runningCost,
+      topUp: w.totals.topUp,
       perDriver: cabs.map(function (c) {
+        var net = w.projectedNet(c);
         return {
-          id: c.id, earnings: c.earnings,
-          net: c.earnings - cfg.costPerBlock * (c.blocks.empty + c.blocks.one + c.blocks.two),
+          id: c.id, earnings: c.earnings, net: net,
           time: c.time, blocks: c.blocks,
         };
       }),
@@ -162,8 +163,9 @@ function definePoolMetrics(root) {
     var lostToSharing = -rate * pairShared;
     var detourPay = rate * extraSec;
     var premiumPart = rate * X * pairShared;
+    var topUpPart = pw.topUp - bw.topUp;
     var deltaPay = pw.driverPay - bw.driverPay;
-    var fleetEffect = deltaPay - (lostToSharing + detourPay + premiumPart);
+    var fleetEffect = deltaPay - (lostToSharing + detourPay + premiumPart + topUpPart);
     var breakEvenX = pairShared > EPS ? 1 - extraSec / pairShared : null;
 
     var optInsRequested = P.riders.filter(function (r) { return r.pool && r.state !== 'scheduled'; }).length;
@@ -212,6 +214,7 @@ function definePoolMetrics(root) {
           lostToSharing: lostToSharing,
           detourPay: detourPay,
           premium: premiumPart,
+          topUp: topUpPart,
           fleet: fleetEffect,
           pool: pw.driverPay,
         },
