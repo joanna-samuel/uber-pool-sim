@@ -48,8 +48,8 @@ function definePoolSim(root) {
     duration: 300,      // P, simulated seconds
     poolOptIn: 60,      // % of riders who opt in to Pool
     maxDetour: 1.5,     // max in-car time / original estimate
-    driverPremium: 25,  // X, % extra per second while 2 riders are aboard
-    poolDiscount: 30,   // Y, % off the standard fare for opting in
+    driverPremium: 40,  // X, % extra per second while 2 riders are aboard
+    poolDiscount: 10,   // Y, % off the standard fare for a trip that shares
     pingRadius: 15,     // blocks of driving from a cab to a pickup
     patience: 120,      // seconds a rider waits unmatched before giving up
     pickupSlip: 20,     // seconds a promised pickup may slip when a cab reroutes
@@ -69,6 +69,8 @@ function definePoolSim(root) {
   var MAX_QUEUE_SCAN = 250;   // riders considered per dispatch batch (oldest first)
   var THREAT_RADIUS = 6;      // manhattan blocks, fixed
   var THREAT_FRACTION = 0.45; // of the run, then the diamond closes
+  var LEFT_TURN = 1.25;       // left turns take 25% longer and do not stop
+  var LIGHT_BLOCKS = 1;       // ponytail: a right turn waits one block at a light. Not a signal cycle.
   var REASSIGN_MIN_GAIN = 8;  // seconds of pickup a re-dispatch must save...
   var REASSIGN_MIN_RATIO = 0.7; // ...and the new ETA must be <= 70% of the old
   var EPS = 1e-6;
@@ -86,6 +88,39 @@ function definePoolSim(root) {
 
   function manhattan(ax, ay, bx, by) {
     return Math.abs(ax - bx) + Math.abs(ay - by);
+  }
+
+  // +y is down the map. Cross product > 0 is a right turn, < 0 is a left turn.
+  // A left turn slows the next block and does not stop. A right turn waits at a light.
+  function turnCross(hx, hy, nx, ny) {
+    if ((!hx && !hy) || (hx === nx && hy === ny)) return 0;
+    return hx * ny - hy * nx;
+  }
+  function turnFactor(hx, hy, nx, ny) {
+    return turnCross(hx, hy, nx, ny) < 0 ? LEFT_TURN : 1;
+  }
+  function lightBlocks(hx, hy, nx, ny) {
+    return turnCross(hx, hy, nx, ny) > 0 ? LIGHT_BLOCKS : 0;
+  }
+
+  // Time for one L, and whether it steps into the closed diamond.
+  function lStats(zone, x, y, tx, ty, hx, hy, xFirst) {
+    var dx = tx - x, dy = ty - y;
+    var legs = xFirst
+      ? [[Math.sign(dx), 0, Math.abs(dx)], [0, Math.sign(dy), Math.abs(dy)]]
+      : [[0, Math.sign(dy), Math.abs(dy)], [Math.sign(dx), 0, Math.abs(dx)]];
+    var time = 0, hit = false, cx = x, cy = y, hhx = hx, hhy = hy;
+    for (var i = 0; i < 2; i++) {
+      var dirx = legs[i][0], diry = legs[i][1], n = legs[i][2];
+      if (!n) continue;
+      time += lightBlocks(hhx, hhy, dirx, diry) + turnFactor(hhx, hhy, dirx, diry) + (n - 1);
+      for (var k = 0; k < n; k++) {
+        cx += dirx; cy += diry;
+        if (zone && manhattan(cx, cy, zone.x, zone.y) <= zone.r) hit = true;
+      }
+      hhx = dirx; hhy = diry;
+    }
+    return { time: time, hit: hit };
   }
 
   function normalizeConfig(input) {
@@ -164,6 +199,9 @@ function definePoolSim(root) {
         plan: [],       // pending stops, in order
         riders: [],     // riders committed: assigned or aboard
         onboard: [],
+        hx: 0, hy: 0,   // heading of the last finished block; 0,0 = not moving yet
+        slowEdge: false,
+        light: 0,       // seconds still to sit before the current block
         time: { idle: 0, empty: 0, one: 0, two: 0 },
         blocks: { empty: 0, one: 0, two: 0 },
         earnings: 0, premium: 0, topUpPaid: 0, trips: 0, reroutes: 0,
@@ -260,6 +298,12 @@ function definePoolSim(root) {
     }
     for (i = 0; i < cancel.length; i++) this.loseUnpicked(cab, cancel[i]);
     kept = kept.filter(function (stop) { return !stop.rider || stop.rider.state !== 'lost'; });
+    if (cab.next && !this.zone(cab.x, cab.y) && this.zone(cab.next.x, cab.next.y)) {
+      cab.next = null;
+      cab.progress = 0;
+      cab.light = 0;
+      cab.slowEdge = false;
+    }
     var px = cab.next ? cab.next.x : cab.x;
     var py = cab.next ? cab.next.y : cab.y;
     var dropAt = { x: px, y: py };
@@ -300,6 +344,52 @@ function definePoolSim(root) {
     for (var i = 0; i < this.cabs.length; i++) this.clearCab(this.cabs[i]);
   };
 
+  // Next block toward a stop. Prefer the quicker L (a left turn beats a light).
+  // A cab already outside the closed diamond does not step into it.
+  // ponytail: around the diamond, each step only looks at the next block.
+  World.prototype.stepToward = function (x, y, tx, ty, hx, hy) {
+    if (x === tx && y === ty) return null;
+    var dx = tx - x, dy = ty - y;
+    var zone = this.threatOn ? this.threat : null;
+    var outside = zone && manhattan(x, y, zone.x, zone.y) > zone.r;
+    function blocked(dir) {
+      if (!outside) return false;
+      return manhattan(x + dir[0], y + dir[1], zone.x, zone.y) <= zone.r;
+    }
+    var sx = dx ? [Math.sign(dx), 0] : null;
+    var sy = dy ? [0, Math.sign(dy)] : null;
+    if (sx && sy) {
+      var a = lStats(zone, x, y, tx, ty, hx || 0, hy || 0, true);
+      var b = lStats(zone, x, y, tx, ty, hx || 0, hy || 0, false);
+      var pickX = a.hit === b.hit ? a.time <= b.time : !a.hit;
+      var chosen = pickX ? sx : sy;
+      if (!blocked(chosen)) return chosen;
+    } else if (sx || sy) {
+      var only = sx || sy;
+      if (!blocked(only)) return only;
+    }
+    var G = this.cfg.gridSize;
+    var dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    var best = null, bestKey = null;
+    var blockedDir = sx && blocked(sx) ? sx : sy && blocked(sy) ? sy : null;
+    for (var i = 0; i < 4; i++) {
+      var nx = x + dirs[i][0], ny = y + dirs[i][1];
+      if (nx < 0 || ny < 0 || nx >= G || ny >= G) continue;
+      if (outside && manhattan(nx, ny, zone.x, zone.y) <= zone.r) continue;
+      var parallel = 0;
+      if (blockedDir) {
+        var blockedOnX = blockedDir[0] !== 0;
+        var stepOnX = dirs[i][0] !== 0;
+        parallel = blockedOnX === stepOnX ? 1 : 0;
+      }
+      var key = manhattan(nx, ny, tx, ty) * 100 + parallel * 10
+        + lightBlocks(hx || 0, hy || 0, dirs[i][0], dirs[i][1])
+        + turnFactor(hx || 0, hy || 0, dirs[i][0], dirs[i][1]);
+      if (bestKey == null || key < bestKey) { bestKey = key; best = dirs[i]; }
+    }
+    return best || sx || sy;
+  };
+
   World.prototype.step = function () {
     if (!this.threatOn && this.t >= this.threat.at - EPS) this.closeZone();
     // Riders who requested before this instant join the queue.
@@ -334,29 +424,51 @@ function definePoolSim(root) {
     for (var guard = 0; guard < 10000; guard++) {
       if (!cab.next) {
         this.serveStops(cab, now);
+        if (!cab.plan.length && this.threatOn && this.zone(cab.x, cab.y)) {
+          var out = this.exitCell(cab.x, cab.y);
+          if (out) cab.plan = [{ type: 'exit', x: out.x, y: out.y }];
+          this.makeWhole(cab);
+        }
         if (!cab.plan.length) {
           cab.time.idle += budget / this.speed;
           return;
         }
         if (budget <= EPS) return;
         var s = cab.plan[0];
-        // L-shaped routing: finish the x leg, then the y leg.
-        cab.next = s.x !== cab.x
-          ? { x: cab.x + Math.sign(s.x - cab.x), y: cab.y }
-          : { x: cab.x, y: cab.y + Math.sign(s.y - cab.y) };
+        var st = this.stepToward(cab.x, cab.y, s.x, s.y, cab.hx, cab.hy);
+        if (!st) {
+          cab.time.idle += budget / this.speed;
+          return;
+        }
+        var nx = st[0], ny = st[1];
+        cab.slowEdge = turnFactor(cab.hx, cab.hy, nx, ny) > 1;
+        cab.light = lightBlocks(cab.hx, cab.hy, nx, ny) / this.speed;
+        cab.next = { x: cab.x + nx, y: cab.y + ny };
         cab.progress = 0;
       }
-      var move = Math.min(1 - cab.progress, budget);
-      var sec = move / this.speed;
+      if (cab.light > EPS) {
+        var wait = Math.min(cab.light, budget / this.speed);
+        this.accrue(cab, wait, 0);
+        cab.light -= wait;
+        budget -= wait * this.speed;
+        now += wait;
+        if (budget <= EPS) return;
+      }
+      var factor = cab.slowEdge ? LEFT_TURN : 1;
+      var move = Math.min(1 - cab.progress, budget / factor);
+      var sec = move * factor / this.speed;
       this.accrue(cab, sec, move);
       cab.progress += move;
-      budget -= move;
+      budget -= move * factor;
       now += sec;
       if (cab.progress >= 1 - EPS) {
+        cab.hx = cab.next.x - cab.x;
+        cab.hy = cab.next.y - cab.y;
         cab.x = cab.next.x;
         cab.y = cab.next.y;
         cab.next = null;
         cab.progress = 0;
+        cab.slowEdge = false;
       }
       if (budget <= EPS) {
         if (!cab.next) this.serveStops(cab, now);
@@ -453,10 +565,12 @@ function definePoolSim(root) {
   // `newRider` is the rider being inserted (their pickup must be within the
   // ping radius); pass check=false to time a plan already committed.
   World.prototype.evalPlan = function (cab, plan, newRider, check) {
+    var world = this;
     var speed = this.speed, limit = this.cfg.maxDetour;
     var maxPick = this.cfg.pingRadius / speed;
     var rate = this.cfg.driverRate, prem = this.X, cost = this.cfg.costPerBlock;
     var t = this.t, x, y, pay = 0, fuel = 0, load = cab.onboard.length;
+    var hx = cab.hx || 0, hy = cab.hy || 0;
     var aboard = [], shared = {}, seen = {};
     function note(r) { seen[r.id] = r; }
     for (var a = 0; a < cab.onboard.length; a++) {
@@ -464,18 +578,42 @@ function definePoolSim(root) {
       note(cab.onboard[a]);
       if (cab.onboard[a].sharedSec > EPS) shared[cab.onboard[a].id] = true;
     }
-    function leg(blocks) {
+    function leg(blocks, factor) {
       if (!(blocks > 0)) return;
+      var sec = blocks * factor / speed;
       if (load >= 2) {
         for (var u = 0; u < aboard.length; u++) shared[aboard[u].id] = true;
       }
       fuel += cost * blocks;
-      if (load === 1) pay += rate * blocks / speed;
-      else if (load >= 2) pay += rate * (1 + prem) * blocks / speed;
-      t += blocks / speed;
+      if (load === 1) pay += rate * sec;
+      else if (load >= 2) pay += rate * (1 + prem) * sec;
+      t += sec;
+    }
+    function sit(sec) {
+      if (!(sec > 0)) return;
+      if (load >= 2) {
+        for (var u = 0; u < aboard.length; u++) shared[aboard[u].id] = true;
+      }
+      if (load === 1) pay += rate * sec;
+      else if (load >= 2) pay += rate * (1 + prem) * sec;
+      t += sec;
+    }
+    // One block at a time, same choice advance() makes.
+    function drive(tx, ty) {
+      var guard = 0, limit = world.cfg.gridSize * world.cfg.gridSize;
+      while ((x !== tx || y !== ty) && guard++ < limit) {
+        var st = world.stepToward(x, y, tx, ty, hx, hy);
+        if (!st) break;
+        sit(lightBlocks(hx, hy, st[0], st[1]) / speed);
+        leg(1, turnFactor(hx, hy, st[0], st[1]));
+        hx = st[0]; hy = st[1];
+        x += st[0]; y += st[1];
+      }
     }
     if (cab.next) {
-      leg(1 - cab.progress);
+      sit(cab.light || 0);
+      leg(1 - cab.progress, cab.slowEdge ? LEFT_TURN : 1);
+      hx = cab.next.x - cab.x; hy = cab.next.y - cab.y;
       x = cab.next.x; y = cab.next.y;
     } else {
       x = cab.x; y = cab.y;
@@ -483,8 +621,7 @@ function definePoolSim(root) {
     var picks = {}, drops = {}, newPick = null;
     for (var i = 0; i < plan.length; i++) {
       var s = plan[i], r = s.rider;
-      leg(manhattan(x, y, s.x, s.y));
-      x = s.x; y = s.y;
+      drive(s.x, s.y);
       if (s.type === 'exit') continue;
       if (s.type === 'pickup') {
         load++;
@@ -864,6 +1001,9 @@ function definePoolSim(root) {
     normalizeConfig: normalizeConfig,
     makeScenario: makeScenario,
     manhattan: manhattan,
+    turnFactor: turnFactor,
+    lightBlocks: lightBlocks,
+    LEFT_TURN: LEFT_TURN,
     World: World,
     Simulation: Simulation,
   };

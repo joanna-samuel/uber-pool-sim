@@ -28,6 +28,19 @@ function runChecked(over, onStep) {
   return s.finish();
 }
 const inCar = (r) => r.dropoffAt - r.pickupAt;
+function lHits(ox, oy, dx, dy, z, yFirst) {
+  let x = ox, y = oy;
+  const legs = yFirst
+    ? [[0, Math.sign(dy - oy), Math.abs(dy - oy)], [Math.sign(dx - ox), 0, Math.abs(dx - ox)]]
+    : [[Math.sign(dx - ox), 0, Math.abs(dx - ox)], [0, Math.sign(dy - oy), Math.abs(dy - oy)]];
+  for (const [sx, sy, n] of legs) {
+    for (let i = 0; i < n; i++) {
+      x += sx; y += sy;
+      if (S.manhattan(x, y, z.x, z.y) <= z.r) return true;
+    }
+  }
+  return false;
+}
 
 const SCENARIOS = [
   {},
@@ -49,6 +62,22 @@ function finished(over) {
 
 console.log('PoolSim engine tests');
 
+test('a left turn takes 25% longer and does not stop; a right turn waits at a light', () => {
+  assert.strictEqual(S.turnFactor(0, 0, 1, 0), 1);
+  assert.strictEqual(S.turnFactor(1, 0, 1, 0), 1);
+  assert.strictEqual(S.turnFactor(1, 0, 0, -1), S.LEFT_TURN); // east then up the map
+  assert.strictEqual(S.lightBlocks(1, 0, 0, -1), 0);
+  assert.strictEqual(S.turnFactor(1, 0, 0, 1), 1); // east then down the map
+  assert.strictEqual(S.lightBlocks(1, 0, 0, 1), 1);
+  assert.strictEqual(S.LEFT_TURN, 1.25);
+});
+
+test('a free left beats waiting at a light when both reach the stop', () => {
+  const w = new S.Simulation({ riders: 0, cabs: 1, duration: 1 }).pool;
+  // South, then east, is a left. East, then south, is a right and a light.
+  assert.deepStrictEqual(w.stepToward(0, 0, 2, 2, 0, 0), [0, 1]);
+});
+
 test('never more than 2 aboard, now or anywhere in a planned route', () => {
   for (const over of SCENARIOS) {
     runChecked(over, (s) => {
@@ -64,6 +93,9 @@ test('never more than 2 aboard, now or anywhere in a planned route', () => {
             assert(load <= 2 && load >= 0, `cab ${c.id} plan load ${load}`);
           }
           assert(riderStops <= S.MAX_PLAN_STOPS, 'plan too long');
+          if (w.threatOn && c.next && S.manhattan(c.x, c.y, w.threat.x, w.threat.y) > w.threat.r) {
+            assert(S.manhattan(c.next.x, c.next.y, w.threat.x, w.threat.y) > w.threat.r, `cab ${c.id} drove into the closed area`);
+          }
         }
       }
     });
@@ -88,8 +120,20 @@ test('solo riders (both worlds) ride exactly their estimate and never share', ()
       if (r.state !== 'done') continue;
       const z = s.pool.threat;
       const destClosed = S.manhattan(r.dx, r.dy, z.x, z.y) <= z.r && r.dropoffAt >= z.at - EPS;
-      if (destClosed) assert(inCar(r) <= r.est + EPS, `rider ${r.id} evacuation lengthened the ride`);
-      else assert(Math.abs(inCar(r) - r.est) < EPS, `rider ${r.id} solo ride ${inCar(r)} != ${r.est}`);
+      const around = lHits(r.ox, r.oy, r.dx, r.dy, z) && lHits(r.ox, r.oy, r.dx, r.dy, z, true);
+      const bent = r.pickupAt < z.at - EPS && r.dropoffAt > z.at + EPS;
+      if (!destClosed && !around && !bent) {
+        const extra = inCar(r) - r.est;
+        const step = 1 / s.cfg.cabSpeed;
+        const left = (S.LEFT_TURN - 1) * step;
+        let matched = extra < 1e-4;
+        for (let a = 0; a <= 2 && !matched; a++) {
+          for (let b = 0; b <= 2 - a; b++) {
+            if (Math.abs(extra - (a * left + b * step)) < 1e-4) matched = true;
+          }
+        }
+        assert(extra >= -EPS && matched, `rider ${r.id} solo ride ${inCar(r)} != ${r.est} plus turns`);
+      }
       assert(r.sharedSec < EPS && r.coRiders.length === 0, `solo rider ${r.id} shared`);
     }
     for (const c of s.base.cabs) assert(c.time.two < EPS, 'baseline cab carried 2');

@@ -115,16 +115,22 @@
   MapView.prototype.traceRoute = function (ctx, cab, g) {
     var p = this.cabPoint(cab);
     ctx.moveTo(p.x, p.y);
-    var cx = cab.x, cy = cab.y;
+    var x = cab.x, y = cab.y, hx = cab.hx || 0, hy = cab.hy || 0;
     if (cab.next) {
-      cx = cab.next.x; cy = cab.next.y;
-      ctx.lineTo(g.pad + cx * g.cell, g.pad + cy * g.cell);
+      hx = cab.next.x - cab.x; hy = cab.next.y - cab.y;
+      x = cab.next.x; y = cab.next.y;
+      ctx.lineTo(g.pad + x * g.cell, g.pad + y * g.cell);
     }
+    var w = this.world, limit = g.G * g.G;
     for (var i = 0; i < cab.plan.length; i++) {
-      var s = cab.plan[i];
-      if (s.x !== cx) ctx.lineTo(g.pad + s.x * g.cell, g.pad + cy * g.cell);
-      ctx.lineTo(g.pad + s.x * g.cell, g.pad + s.y * g.cell);
-      cx = s.x; cy = s.y;
+      var s = cab.plan[i], guard = 0;
+      while ((x !== s.x || y !== s.y) && guard++ < limit) {
+        var st = w.stepToward(x, y, s.x, s.y, hx, hy);
+        if (!st) break;
+        x += st[0]; y += st[1];
+        hx = st[0]; hy = st[1];
+        ctx.lineTo(g.pad + x * g.cell, g.pad + y * g.cell);
+      }
     }
   };
 
